@@ -48,6 +48,7 @@ import requests
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+from author_model import predict_author_signal
 
 # The model used for the Layer 2 judgment. Claude Opus 5 is the most capable
 # model; switch to "claude-haiku-4-5" if you are scoring many URLs and want to
@@ -183,16 +184,19 @@ def _extract_page_metadata(url: str) -> Dict[str, bool]:
             "author": bool,
             "date": bool,
             "references": bool
+            "preprint": bool,
+            "cloudflare": bool,
         }
     """
 
     metadata = {
-        "author": False,
-        "date": False,
-        "references": False,
-        "preprint": False,
-        "cloudflare": False,
-    }
+    "author": False,
+    "author_count": 0,
+    "date": False,
+    "references": False,
+    "preprint": False,
+    "cloudflare": False,
+}
 
     try:
         response = requests.get(url, timeout=5)
@@ -202,11 +206,23 @@ def _extract_page_metadata(url: str) -> Dict[str, bool]:
 
         html = response.text
 
-        # Check for author metadata
-        if re.search(r"citation_author", html, re.IGNORECASE):
+    # ------------------------------------------------------------
+    # Count authors from citation metadata
+    # ------------------------------------------------------------
+        authors = re.findall(
+            r"citation_author",
+            html,
+            re.IGNORECASE,
+        )
+
+        metadata["author_count"] = min(len(authors), 20)
+
+        if metadata["author_count"] > 0:
             metadata["author"] = True
 
-        # Check for publication date metadata
+    # ------------------------------------------------------------
+    # Publication date metadata
+    # ------------------------------------------------------------
         if re.search(
             r"citation_publication_date|published_time",
             html,
@@ -214,21 +230,29 @@ def _extract_page_metadata(url: str) -> Dict[str, bool]:
         ):
             metadata["date"] = True
 
-        # Check for references / citations
+    # ------------------------------------------------------------
+    # References / citations
+    # ------------------------------------------------------------
         if re.search(
             r"citation_reference|references|bibliography|works cited",
             html,
             re.IGNORECASE,
         ):
             metadata["references"] = True
-        # Check for preprint indicators
+
+    # ------------------------------------------------------------
+    # Preprint indicators
+    # ------------------------------------------------------------
         if re.search(
-            r"preprint|arxiv|biorxiv|medrxiv",
-            html,
+            r"arxiv\.org|biorxiv\.org|medrxiv\.org",
+            url,
             re.IGNORECASE,
         ):
             metadata["preprint"] = True
 
+    # ------------------------------------------------------------
+    # Cloudflare detection
+    # ------------------------------------------------------------
         if "cloudflare" in html.lower():
             metadata["cloudflare"] = True
 
@@ -314,50 +338,34 @@ def rule_based_signals(url: str) -> List[Signal]:
 # webpage metadata extraction so the scorer can identify authorship,
 # publication information, and citation evidence directly from the page.
 # -------------------------------------------------------------------------
+    metadata_signal = predict_author_signal(
+        metadata["author_count"],
+        metadata["date"],
+        metadata["references"],
+        metadata["preprint"],
+    )
 
-    if metadata["author"]:
-        signals.append(
-            Signal(
-                "author_present",
-                0.02,
-                "Page identifies one or more authors"
+    signals.append(
+        Signal(
+            "metadata_regression",
+            metadata_signal,
+            (
+                f"Metadata model contribution {metadata_signal:.3f} "
+                f"(authors={metadata['author_count']}, "
+                f"date={metadata['date']}, "
+                f"references={metadata['references']}, "
+                f"preprint={metadata['preprint']})"
             )
         )
-
-    if metadata["date"]:
-        signals.append(
-            Signal(
-                "publication_date",
-                0.01,
-                "Page includes publication metadata"
-            )
-        )
-
-    if metadata["references"]:
-        signals.append(
-            Signal(
-                "references_present",
-                0.05,
-                "Page includes references or citations"
-            )
-        )
-
-    if metadata["preprint"]:
-        signals.append(
-            Signal(
-                "preprint",
-                -0.15,
-                "Page appears to be a preprint rather than a peer-reviewed publication"
-            )
-        )
+    )
     if metadata["cloudflare"]:
         signals.append(
             Signal(
                 "metadata_blocked",
                 0.0,
                 "Metadata extraction was limited by Cloudflare protection"
-            )
         )
+    )
     return signals
 
 
